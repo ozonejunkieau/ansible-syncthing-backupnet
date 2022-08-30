@@ -1,0 +1,189 @@
+---
+- name: Setup a Syncthing Server
+  become: yes
+
+  hosts:
+    - syncthing_servers
+
+  vars:
+    syncthing_username: syncthing_user
+    syncthing_password: "$2 HASHED PASSWORD GOES HERE"
+    syncthing_discovery_url: https://syncthing-disco.example.com:8443
+
+    syncthing_version: v1.19.2
+    syncthing_architecture: linux-amd64
+    syncthing_download_url: "https://github.com/syncthing/syncthing/releases/download/{{ syncthing_version }}/syncthing-{{ syncthing_architecture }}-{{ syncthing_version }}.tar.gz"
+    syncthing_path: /opt/syncthing
+    syncthing_port: 8384
+
+  tasks:
+    - name: Install required packages
+      ansible.builtin.dnf:
+        name:
+          - python3-lxml
+          - rsync
+          - nfs-utils
+          - tar
+        state: present
+
+    - name: Set some fact
+      ansible.builtin.set_fact:
+        _syncthing_install_path: "{{ syncthing_path }}/download"
+        _syncthing_current_path: "{{ syncthing_path }}/current"
+        _syncthing_config_path: "{{ syncthing_path }}/conf"
+
+    - name: Create a syncthing group
+      ansible.builtin.group:
+        name: syncthing
+        state: present
+
+    - name: Create a syncthing user
+      ansible.builtin.user:
+        name: syncthing
+        group: syncthing
+        state: present
+        shell: /sbin/nologin
+        create_home: yes
+        home: "{{ syncthing_path }}"
+
+    - name: Create a directory for the installer
+      ansible.builtin.file:
+        path: "{{ _syncthing_install_path }}"
+        owner: syncthing
+        group: syncthing
+        state: directory
+
+    - name: Download syncthing
+      ansible.builtin.get_url:
+        dest: "{{ _syncthing_install_path }}"
+        owner: syncthing
+        group: syncthing
+        url: "{{ syncthing_download_url }}"
+
+    - name: Extract file
+      ansible.builtin.unarchive:
+        dest: "{{ syncthing_path }}"
+        owner: syncthing
+        group: syncthing
+        src: "{{ _syncthing_install_path }}/syncthing-{{ syncthing_architecture }}-{{ syncthing_version }}.tar.gz"
+        remote_src: yes
+
+    - name: Create a symlink to a predictable path for the installation
+      ansible.builtin.file:
+        dest: "{{ _syncthing_current_path }}"
+        src: "{{ syncthing_path }}/syncthing-{{ syncthing_architecture }}-{{ syncthing_version }}/"
+        state: link
+
+    - name: Create a directory for the configuration
+      ansible.builtin.file:
+        path: "{{ _syncthing_config_path }}"
+        owner: syncthing
+        group: syncthing
+        state: directory
+
+    - name: Copy certificate file to config path
+      ansible.builtin.copy:
+        src: certs/{{ inventory_hostname }}/syncthing.pem
+        dest: "{{ _syncthing_config_path }}/https-cert.pem"
+        owner: syncthing
+        group: syncthing
+      notify: restart syncthing
+
+    - name: Copy certificate key file to config path
+      ansible.builtin.copy:
+        src: certs/{{ inventory_hostname }}/syncthing-key.pem
+        dest: "{{ _syncthing_config_path }}/https-key.pem"
+        owner: syncthing
+        group: syncthing
+        mode: "0600"
+      notify: restart syncthing
+
+    - name: Create systemd template file
+      ansible.builtin.template:
+        src: templates/syncthing.service.j2
+        dest: /usr/lib/systemd/system/syncthing.service
+        owner: root
+        group: root
+        mode: 0644
+      notify: restart syncthing
+
+    - name: Ensure the service is started and running
+      ansible.builtin.service:
+        name: syncthing.service
+        state: started
+        enabled: yes
+
+    - name: Allow the syncthing protocol through the firewall
+      ansible.builtin.firewalld:
+        port: "{{ syncthing_port }}/tcp"
+        permanent: yes
+        state: enabled
+      notify: reload firewalld
+
+    - name: Allow the syncthing protocol through the firewall
+      ansible.builtin.firewalld:
+        port: "22000/tcp"
+        permanent: yes
+        state: enabled
+      notify: reload firewalld
+
+    - name: Wait for port to become open on the host, don't start checking for 5 seconds
+      wait_for:
+        port: "{{ syncthing_port }}"
+        delay: 5
+
+    - name: Enable https
+      community.general.xml:
+        path: "{{ _syncthing_config_path }}/config.xml"
+        xpath: /configuration/gui
+        attribute: tls
+        value: "true"
+
+    - name: Configure credentials in xml file
+      community.general.xml:
+        path: "{{ _syncthing_config_path }}/config.xml"
+        xpath: /configuration/gui/user
+        value: "{{ syncthing_username }}"
+
+    - name: Configure credentials in xml file
+      community.general.xml:
+        path: "{{ _syncthing_config_path }}/config.xml"
+        xpath: /configuration/gui/password
+        value: "{{ syncthing_password }}"
+
+    - name: Configure dark theme
+      community.general.xml:
+        path: "{{ _syncthing_config_path }}/config.xml"
+        xpath: /configuration/gui/theme
+        value: dark
+
+    - name: Set discovery server
+      community.general.xml:
+        path: "{{ _syncthing_config_path }}/config.xml"
+        xpath: /configuration/options/globalAnnounceServer
+        value: "{{ syncthing_discovery_url }}"
+
+    - name: Disable local discovery
+      community.general.xml:
+        path: "{{ _syncthing_config_path }}/config.xml"
+        xpath: /configuration/options/localAnnounceEnabled
+        value: "false"
+
+    - name: Disable relay usage
+      community.general.xml:
+        path: "{{ _syncthing_config_path }}/config.xml"
+        xpath: /configuration/options/relaysEnabled
+        value: "false"
+
+
+  handlers:
+    - name: restart syncthing
+      ansible.builtin.service:
+        name: syncthing.service
+        state: restarted
+        daemon_reload: yes
+
+    - name: reload firewalld
+      ansible.builtin.service:
+        name: firewalld
+        state: reloaded

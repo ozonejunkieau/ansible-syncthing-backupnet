@@ -1,0 +1,177 @@
+---
+- name: Setup LUKS & Syncthing Partitioning
+  become: yes
+
+  hosts:
+    - host1.syncthing.example.com
+    - host2.syncthing.example.com
+
+  vars:
+    syncthing_keys_path: /etc/keys
+    local_syncthing_keys_path: ".syncthing"
+    local_syncthing_keys_user: localuser
+
+  tasks:
+    - name: Ensure required packages are installed
+      ansible.builtin.dnf:
+        name: cryptsetup
+        state: present
+
+    - name: Ensure that kernel modules for luks are loaded
+      community.general.modprobe:
+        name: dm-crypt
+        state: present
+
+    - name: Create directory for storing keys locally
+      ansible.builtin.file:
+        path: "{{ local_syncthing_keys_path }}"
+        state: directory
+        owner: "{{ local_syncthing_keys_user }}"
+        group: "{{ local_syncthing_keys_user }}"
+        mode: "1700"
+      delegate_to: localhost
+      connection: local
+      run_once: yes
+
+    - name: Generate any keys that are required
+      ansible.builtin.command:
+        cmd: "dd if=/dev/urandom of={{ local_syncthing_keys_path }}/{{ item.disk_id }}.key bs=1024 count=4"
+        creates: "{{ local_syncthing_keys_path }}/{{ item.disk_id }}.key"
+      become: yes
+      loop: "{{ syncthing_disks }}"
+      when: syncthing_disks is defined
+      connection: local
+      delegate_to: localhost
+      run_once: no
+
+    - name: Set appropriate file permissions
+      ansible.builtin.file:
+        path: "{{ local_syncthing_keys_path }}/{{ item.disk_id }}.key"
+        owner: "{{ local_syncthing_keys_user }}"
+        group: "{{ local_syncthing_keys_user }}"
+        mode: "0600"
+      become: yes
+      loop: "{{ syncthing_disks }}"
+      when: syncthing_disks is defined
+      connection: local
+      delegate_to: localhost
+      run_once: no
+
+    - name: Create remote directory for storing keys
+      ansible.builtin.file:
+        path: "{{ syncthing_keys_path }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "1700"
+
+    - name: Create a tmpfs mounted in the key path
+      ansible.posix.mount:
+        boot: no
+        fstype: tmpfs
+        opts: rw,size=4M,nr_inodes=100,noexec,nodev,nosuid,uid=0,gid=0,mode=1700
+        path: "{{ syncthing_keys_path }}"
+        state: mounted
+        src: tmpfs
+
+    - name: Gather the output of mount command to check that the mount point is as expected.
+      ansible.builtin.command:
+        cmd: mount
+        warn: false
+      become: yes
+      changed_when: no
+      register: cmd_mount
+
+    - name: Ensure that the key path is a mount point, to protect key from being written to disk
+      ansible.builtin.assert:
+        that:
+          -  "'tmpfs on {{ syncthing_keys_path }} ' in cmd_mount.stdout"
+
+    - name: Copy all required keyfiles to tmpfs
+      ansible.builtin.copy:
+        src: "{{ local_syncthing_keys_path }}/{{ item.disk_id }}.key"
+        dest: "{{ syncthing_keys_path }}/{{ item.disk_id }}"
+        owner: root
+        group: root
+        mode: 0600
+      loop: "{{ syncthing_disks }}"
+      when: syncthing_disks is defined
+
+    - name: Create a new primary partition for LUKS
+      community.general.parted:
+        device: "/dev/disk/by-id/{{item.disk_id}}"
+        label: gpt
+        number: 1
+        state: present
+      loop: "{{ syncthing_disks }}"
+
+    - name: Create LUKS containers for LVM
+      community.crypto.luks_device:
+        device: "/dev/disk/by-id/{{item.disk_id}}-part1"
+        state: present
+        keyfile: "{{ syncthing_keys_path }}/{{ item.disk_id }}"
+        hash: SHA512
+        keysize: 512
+        cipher: aes-xts-plain64
+        label: "{{ item.name }}"
+      loop: "{{ syncthing_disks }}"
+
+    - name: Open LUKS containers on partitions
+      community.crypto.luks_device:
+        device: "/dev/disk/by-id/{{item.disk_id}}-part1"
+        name: "{{ item.name }}"
+        state: opened
+        keyfile: "{{ syncthing_keys_path }}/{{ item.disk_id }}"
+      loop: "{{ syncthing_disks }}"
+
+    - name: Remove tmpfs used for keys
+      ansible.posix.mount:
+        path: "{{ syncthing_keys_path }}"
+        state: unmounted
+
+    - name: Create LVM VG on each disk
+      community.general.lvg:
+        vg: "vg_{{ item.name }}"
+        pvs: "/dev/mapper/{{ item.name }}"
+        pvresize: yes
+      loop: "{{ syncthing_disks }}"
+
+    - name: Create LV for each disk
+      community.general.lvol:
+        vg: "vg_{{ item.name }}"
+        lv: "lv_{{ item.name }}"
+        size: 100%PVS
+      loop: "{{ syncthing_disks }}"
+
+    - name: Create mount point for each disk
+      ansible.builtin.file:
+        path: "/mnt/{{ item.name }}"
+        owner: syncthing
+        group: syncthing
+        mode: '0770'
+        state: directory
+      loop: "{{ syncthing_disks }}"
+
+    - name: Ensure that lv is formatted
+      community.general.filesystem:
+        fstype: xfs
+        dev: "/dev/mapper/vg_{{ item.name }}-lv_{{ item.name }}"
+      loop: "{{ syncthing_disks }}"
+
+    - name: Mount all data lvs
+      ansible.posix.mount:
+        path: "/mnt/{{ item.name }}"
+        src: "/dev/mapper/vg_{{ item.name }}-lv_{{ item.name }}"
+        fstype: xfs
+        opts: noexec,noauto
+        state: mounted
+      loop: "{{ syncthing_disks }}"
+
+    - name: Create Syncthing directories within all mount points
+      ansible.builtin.file:
+        path: "/mnt/{{ item.name }}/syncthing"
+        owner: syncthing
+        group: syncthing
+        mode: '0770'
+        state: directory
+      loop: "{{ syncthing_disks }}"

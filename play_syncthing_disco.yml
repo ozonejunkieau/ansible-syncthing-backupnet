@@ -1,0 +1,116 @@
+---
+
+
+- name: Setup a Syncthing Discovery Server
+  become: yes
+
+  hosts:
+    - syncthing_discovery_servers
+
+  vars:
+    syncthing_disco_version: v1.18.6
+    syncthing_disco_architecture: linux-amd64
+    syncthing_disco_download_url: "https://github.com/syncthing/discosrv/releases/download/v1.18.6/stdiscosrv-{{ syncthing_disco_architecture }}-{{ syncthing_disco_version }}.tar.gz"
+    syncthing_disco_path: /opt/syncthing-disco
+    syncthing_disco_port: 8443
+
+  tasks:
+    - name: Set some fact
+      ansible.builtin.set_fact:
+        _syncthing_disco_install_path: "{{ syncthing_disco_path }}/download"
+        _syncthing_disco_current_path: "{{ syncthing_disco_path }}/current"
+        _syncthing_disco_config_path: "{{ syncthing_disco_path }}/conf"
+
+    - name: Create a syncthing group
+      ansible.builtin.group:
+        name: syncthing
+        state: present
+
+    - name: Create a syncthing user
+      ansible.builtin.user:
+        name: syncthing
+        group: syncthing
+        state: present
+        shell: /sbin/nologin
+        create_home: yes
+        home: "{{ syncthing_disco_path }}"
+
+    - name: Create a directory for the installer
+      ansible.builtin.file:
+        path: "{{ _syncthing_disco_install_path }}"
+        owner: syncthing
+        group: syncthing
+        state: directory
+
+    - name: Download syncthing
+      ansible.builtin.get_url:
+        dest: "{{ _syncthing_disco_install_path }}"
+        owner: syncthing
+        group: syncthing
+        url: "{{ syncthing_disco_download_url }}"
+
+    - name: Extract file
+      ansible.builtin.unarchive:
+        dest: "{{ syncthing_disco_path }}"
+        owner: syncthing
+        group: syncthing
+        src: "{{ _syncthing_disco_install_path }}/stdiscosrv-{{ syncthing_disco_architecture }}-{{ syncthing_disco_version }}.tar.gz"
+        remote_src: yes
+
+    - name: Create a symlink to a predictable path for the installation
+      ansible.builtin.file:
+        dest: "{{ _syncthing_disco_current_path }}"
+        src: "{{ syncthing_disco_path }}/stdiscosrv-{{ syncthing_disco_architecture }}-{{ syncthing_disco_version }}/"
+        state: link
+
+    - name: Create a directory for the configuration
+      ansible.builtin.file:
+        path: "{{ _syncthing_disco_config_path }}"
+        owner: syncthing
+        group: syncthing
+        state: directory
+
+# Copy the certificates to an appropriate location
+    - name: Copy certificate files to config path
+      ansible.builtin.copy:
+        src: certs/{{ inventory_hostname }}/
+        dest: "{{ _syncthing_disco_config_path }}"
+        owner: syncthing
+        group: syncthing
+      notify: restart syncthing-disco
+
+
+    - name: Create systemd template file
+      ansible.builtin.template:
+        src: templates/syncthing_disco.service.j2
+        dest: /usr/lib/systemd/system/syncthing-disco.service
+        owner: root
+        group: root
+        mode: 0644
+      notify: restart syncthing-disco
+
+    - name: Ensure the service is started and running
+      ansible.builtin.service:
+        name: syncthing-disco.service
+        state: started
+        enabled: yes
+
+    - name: Allow the discovery protocol through the firewall
+      ansible.builtin.firewalld:
+        port: "{{ syncthing_disco_port }}/tcp"
+        permanent: yes
+        state: enabled
+      notify: reload firewalld
+
+    # - name: Check that the service is accessible
+
+  handlers:
+    - name: restart syncthing-disco
+      ansible.builtin.service:
+        name: syncthing-disco.service
+        state: restarted
+
+    - name: reload firewalld
+      ansible.builtin.service:
+        name: firewalld
+        state: reloaded
