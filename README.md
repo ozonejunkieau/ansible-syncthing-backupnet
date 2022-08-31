@@ -14,7 +14,7 @@ Blog post with more details is coming.
 ## Operating System Selection
 The plays have successfully been tested on Centos Stream 8, and will likely work without issue on Fedora. Some modifications will be required for usage on Debian/Ubuntu.
 
-# Inventory & Host Variables
+## Inventory & Host Variables
 The following variables are expected to be defined for each node. Disks are access via the `disk-id` and are mapped into a path using the `name`.
 
 ```
@@ -44,19 +44,21 @@ The following variables are expected to be defined for each node. Disks are acce
 
 ```
 
-# TLS Certificates
+## TLS Certificates
 The plays assume the existence of SSL certificates in a specified path with the name of `{{ inventory_hostname }}.crt` and `{{ inventory_hostname }}.key`.
 
-# Syncthing Discovery Server (`play_syncthing_disco.yml`)
+## Plays
+
+### Syncthing Discovery Server (`play_syncthing_disco.yml`)
 
 This play deploys a discovery server onto a host with a TLS certificate, systemd unit file and configures firewall access to allow access.
 
-# Disk Encryption (`play_syncthing_disks.yml`)
+### Disk Encryption (`play_syncthing_disks.yml`)
 
 This play takes care of the disks used for storing Syncthing data. It relies on a list of disks with the name and id defined, these are configured with LUKS encryption and then mounted via LVM.
 
 _NOTE: This will destroy data on disks the first time it is run, be careful!_
 
-# Syncthing (`play_syncthing_disks.yml`)
+### Syncthing (`play_syncthing_disks.yml`)
 
 This play deploys the syncthing application with TLS, sets a username and password, configured firewall rules.
